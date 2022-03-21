@@ -1,0 +1,135 @@
+package com.nssample.product.util;
+
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.net.URL;
+import java.util.List;
+
+import org.springframework.stereotype.Component;
+import org.springframework.web.multipart.MultipartFile;
+
+import com.amazonaws.ClientConfiguration;
+import com.amazonaws.Protocol;
+import com.amazonaws.auth.AWSCredentials;
+import com.amazonaws.auth.BasicAWSCredentials;
+import com.amazonaws.services.s3.AmazonS3;
+import com.amazonaws.services.s3.AmazonS3Client;
+import com.amazonaws.services.s3.model.Bucket;
+import com.amazonaws.services.s3.model.CannedAccessControlList;
+import com.amazonaws.services.s3.model.GeneratePresignedUrlRequest;
+import com.amazonaws.services.s3.model.GetObjectRequest;
+import com.amazonaws.services.s3.model.ObjectListing;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PutObjectRequest;
+import com.amazonaws.services.s3.model.S3ObjectSummary;
+import com.amazonaws.util.IOUtils;
+import com.amazonaws.util.StringUtils;
+
+import lombok.RequiredArgsConstructor;
+
+/**
+ * 참고 URL
+ * https://docs.ceph.com/en/latest/radosgw/s3/java/
+ * 
+ * @author osc
+ * 
+ * gradle 사용시
+ * implementation group: 'org.springframework.cloud', name: 'spring-cloud-aws-context', version: '2.2.1.RELEASE'
+ *
+ */
+@RequiredArgsConstructor
+@Component
+public class CephUploadUtil {
+
+	private final CephProperties cephProperties;
+
+	// S3 setting 후 반환
+	public AmazonS3 getS3Client() {
+
+		String accessKey = this.cephProperties.getAccessKey();
+		String secretKey = this.cephProperties.getSecretKey();
+
+		AWSCredentials credentials = new BasicAWSCredentials(accessKey, secretKey);
+
+		// ref) Ceph Object Storage 서비스를 테스트하는 경우 HTTPS 프로토콜 대신 HTTP 프로토콜을 사용하는 것이 좋습니다.
+		ClientConfiguration clientConfig = new ClientConfiguration();
+		clientConfig.setProtocol(Protocol.HTTP);
+
+		AmazonS3 conn = new AmazonS3Client(credentials, clientConfig);
+		conn.setEndpoint(this.cephProperties.getEndpoint());
+		return conn;
+	}
+
+	/**
+	 * S3에 이미지 파일 저장 후 url 반환
+	 * @param s3Client
+	 * @param saveFilePath
+	 * @param file
+	 * @return
+	 * @throws IOException
+	 */
+    public String putObjectToS3AndGetUrl(AmazonS3 s3Client, String saveFilePath, MultipartFile file) throws IOException {
+        String bucket = this.cephProperties.getBucket();
+
+        ObjectMetadata objectMetadata = new ObjectMetadata();
+        ByteArrayInputStream byteArrayInputStream = getByteArrayInputStream(file, objectMetadata);
+
+        // 이미지 파일 저장
+        s3Client.putObject(new PutObjectRequest(bucket, saveFilePath, byteArrayInputStream, objectMetadata)
+                .withCannedAcl(CannedAccessControlList.PublicRead));
+
+        GeneratePresignedUrlRequest request = new GeneratePresignedUrlRequest(bucket, saveFilePath);
+        return s3Client.generatePresignedUrl(request).toString();
+    }
+
+    private ByteArrayInputStream getByteArrayInputStream(MultipartFile file, ObjectMetadata objectMetadata) throws IOException {
+        byte[] bytes = IOUtils.toByteArray(file.getInputStream());
+        objectMetadata.setContentLength(bytes.length);
+
+        return new ByteArrayInputStream(bytes);
+    }
+
+	public void buckets(AmazonS3 conn) {
+
+		// 소유 버킷 나열
+		List<Bucket> buckets = conn.listBuckets();
+		for (Bucket bucket : buckets) {
+		        System.out.println(bucket.getName() + "\t" +
+		                StringUtils.fromDate(bucket.getCreationDate()));
+		}
+
+		// 버킷 생성
+		Bucket bucket = conn.createBucket("my-new-bucket");
+
+		// 버킷 콘텐츠 나열
+		ObjectListing objects = conn.listObjects(bucket.getName());
+		do {
+		        for (S3ObjectSummary objectSummary : objects.getObjectSummaries()) {
+		                System.out.println(objectSummary.getKey() + "\t" +
+		                        objectSummary.getSize() + "\t" +
+		                        StringUtils.fromDate(objectSummary.getLastModified()));
+		        }
+		        objects = conn.listNextBatchOfObjects(objects);
+		} while (objects.isTruncated());
+
+		// 버킷 삭제
+		/*
+		 * 비어 있지 않은 버킷에 대한 강제 삭제는 불가능함
+		 */
+		conn.deleteBucket(bucket.getName());
+
+		// 개체 다운로드(파일로)
+		conn.getObject(
+		        new GetObjectRequest(bucket.getName(), "perl_poetry.pdf"),
+		        new File("/home/larry/documents/perl_poetry.pdf")
+		);
+
+		// 개체 삭제
+		conn.deleteObject(bucket.getName(), "goodbye.txt");
+
+		// 객체 다운로드 URL 생성(서명 및 서명되지 않음)
+		GeneratePresignedUrlRequest request = new GeneratePresignedUrlRequest(bucket.getName(), "secret_plans.txt");
+		System.out.println(conn.generatePresignedUrl(request));
+	}
+}
